@@ -1,0 +1,11 @@
+---
+# roles/lighthouse/handlers/main.yml
+# Handlers are triggered by notify directives in tasks.
+# They run once at the end of the play, even if notified multiple times.
+
+- name: Restart lighthouse stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ deploy_dir }}"
+    state: present
+    recreate: always
+  become: true

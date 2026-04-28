@@ -1,0 +1,48 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Caddy — TLS termination + reverse proxy
+  # Handles Let's Encrypt certificate issuance/renewal automatically.
+  # Requires ports 80 and 443 to be reachable from the internet.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: ta-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+      - caddy_logs:/var/log/caddy
+    networks: [ta-net]
+    depends_on:
+      - lighthouse
+
+  # ---------------------------------------------------------------------------
+  # Lighthouse — OpenID Federation Trust Anchor
+  # Config is read from ./lighthouse/config.yaml (mounted at /config.yaml
+  # inside the container).  Data (signing keys + badger storage) is persisted
+  # in ./lighthouse/data on the host.
+  # ---------------------------------------------------------------------------
+  lighthouse:
+    image: oidfed/lighthouse:main
+    container_name: ta-lighthouse
+    restart: unless-stopped
+    # Port 7672 bound to loopback for SSH-tunnel access (testing/debugging only).
+    # Normal traffic goes via Caddy. To use: ssh -L 7672:localhost:7672 user@host
+    ports:
+      - "127.0.0.1:7672:7672"
+    volumes:
+      - ./lighthouse/config.yaml:/config.yaml:ro
+      - ./lighthouse/data:/data
+    networks: [ta-net]
+
+volumes:
+  caddy_logs:
+
+networks:
+  ta-net:
+    name: ta-net

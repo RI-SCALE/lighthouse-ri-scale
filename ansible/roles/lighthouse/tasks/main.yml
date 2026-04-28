@@ -1,0 +1,221 @@
+---
+# roles/lighthouse/tasks/main.yml
+# Idempotent task list — safe to run multiple times.
+
+# ---------------------------------------------------------------------------
+# 1. System dependencies
+# ---------------------------------------------------------------------------
+- name: Install prerequisite system packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - openssl
+      - python3-pip
+    state: present
+    update_cache: true
+  become: true
+
+# ---------------------------------------------------------------------------
+# 2. Docker Engine — direct install following Docker official docs for Debian.
+#    Host: Debian 12 (bookworm) x86_64
+#    Ref: https://docs.docker.com/engine/install/debian/
+# ---------------------------------------------------------------------------
+
+- name: Ensure /etc/apt/keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Download Docker GPG key
+  ansible.builtin.shell: >
+    curl -fsSL https://download.docker.com/linux/debian/gpg
+    -o /etc/apt/keyrings/docker.asc
+    && chmod a+r /etc/apt/keyrings/docker.asc
+  args:
+    creates: /etc/apt/keyrings/docker.asc
+  check_mode: false
+  become: true
+
+- name: Configure Docker APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable"
+    mode: "0644"
+  become: true
+  register: docker_repo_written
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: true
+  become: true
+  when: docker_repo_written.changed
+
+- name: Install Docker CE packages
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  become: true
+
+- name: Enable and start Docker service
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Add deploy user to docker group
+  ansible.builtin.user:
+    name: "{{ deploy_user }}"
+    groups: docker
+    append: true
+  become: true
+
+# ---------------------------------------------------------------------------
+# 3. Directory layout
+# ---------------------------------------------------------------------------
+- name: Create deployment directory tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_group }}"
+    mode: "0755"
+  loop:
+    - "{{ deploy_dir }}"
+    - "{{ deploy_dir }}/lighthouse/data/signing"
+    - "{{ deploy_dir }}/lighthouse/data/storage"
+    - "{{ deploy_dir }}/caddy/data"
+    - "{{ deploy_dir }}/caddy/config"
+  become: true
+
+# ---------------------------------------------------------------------------
+# 4. Configuration files (rendered from Jinja2 templates)
+#    - entity_id is baked into config.yaml by Ansible (no env var expansion)
+#    - auto_generate_keys is true on first deploy, false on subsequent runs
+# ---------------------------------------------------------------------------
+- name: Deploy docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ deploy_dir }}/docker-compose.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_group }}"
+    mode: "0644"
+  become: true
+  notify: Restart lighthouse stack
+
+# Check key existence BEFORE rendering config.yaml.j2 — the template uses
+# signing_key.stat.exists to set auto_generate_keys correctly.
+- name: Check if signing key already exists
+  ansible.builtin.stat:
+    path: "{{ deploy_dir }}/lighthouse/data/signing/federation_ES256.pem"
+  register: signing_key
+  become: true
+
+- name: Deploy lighthouse config.yaml
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ deploy_dir }}/lighthouse/config.yaml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_group }}"
+    mode: "0644"
+  become: true
+  notify: Restart lighthouse stack
+
+- name: Deploy Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ deploy_dir }}/caddy/Caddyfile"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_group }}"
+    mode: "0644"
+  become: true
+  notify: Restart lighthouse stack
+
+# ---------------------------------------------------------------------------
+# 5. Docker images + stack
+# ---------------------------------------------------------------------------
+- name: Pull latest Docker images
+  community.docker.docker_compose_v2_pull:
+    project_src: "{{ deploy_dir }}"
+  become: true
+
+- name: Start (or converge) the Compose stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ deploy_dir }}"
+    state: present
+    pull: missing
+  become: true
+  register: compose_result
+
+- name: Show compose result summary
+  ansible.builtin.debug:
+    var: compose_result
+  when: compose_result.changed
+
+# ---------------------------------------------------------------------------
+# 6. Post-deployment checks (run on the remote host itself)
+# ---------------------------------------------------------------------------
+- name: Wait for Lighthouse to be ready
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 443
+    delay: 5
+    timeout: 60
+  become: true
+
+- name: Verify TLS certificate and federation metadata endpoint
+  ansible.builtin.uri:
+    url: "{{ lighthouse_entity_id }}/.well-known/openid-federation"
+    method: GET
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: federation_endpoint
+  retries: 3
+  delay: 5
+  until: federation_endpoint.status == 200
+
+- name: Verify /list endpoint (entity listing)
+  ansible.builtin.uri:
+    url: "{{ lighthouse_entity_id }}/list"
+    method: GET
+    validate_certs: true
+    status_code: 200
+
+- name: Verify /fetch endpoint is registered
+  ansible.builtin.uri:
+    url: "{{ lighthouse_entity_id }}/fetch"
+    method: GET
+    validate_certs: true
+    # /fetch requires ?iss= parameter — without it Lighthouse returns 400/422, not 404/502
+    status_code: [200, 400, 422]
+
+- name: Verify /resolve endpoint is registered
+  ansible.builtin.uri:
+    url: "{{ lighthouse_entity_id }}/resolve"
+    method: GET
+    validate_certs: true
+    # /resolve requires parameters — without them we expect 400/422, not 404/502
+    status_code: [200, 400, 422]
+
+- name: Extract entity_id from live JWT
+  ansible.builtin.shell: >
+    echo '{{ federation_endpoint.content }}' |
+    cut -d'.' -f2 |
+    python3 -c "import sys,base64,json; d=sys.stdin.read().strip(); d+='='*(-len(d)%4); print(json.loads(base64.urlsafe_b64decode(d))['iss'])"
+  register: jwt_iss
+  changed_when: false
+
+- name: Show entity_id from live JWT
+  ansible.builtin.debug:
+    msg: "Trust Anchor is UP. Entity ID in JWT iss claim: {{ jwt_iss.stdout }}"

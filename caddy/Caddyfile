@@ -1,0 +1,45 @@
+# Caddy reverse-proxy configuration for Lighthouse Trust Anchor.
+#
+# This is a REFERENCE file for manual deployments. The Ansible playbook
+# renders caddy/Caddyfile on the remote host from templates/Caddyfile.j2,
+# which automatically substitutes the correct hostname.
+#
+# For manual use: replace CHANGE-ME.example.org with your actual domain.
+#
+# Caddy automatically obtains and renews TLS certificates via Let's Encrypt
+# (ACME HTTP-01 challenge on port 80, served certificate on port 443).
+# The VM must be reachable on both ports from the internet for ACME to work.
+
+CHANGE-ME.example.org {
+    # Block the admin enrollment endpoint from the public internet.
+    # Use via SSH tunnel: ssh -L 7672:localhost:7672 user@host
+    #   then: curl "http://localhost:7672/enroll?sub=<entity_id>"
+    respond /enroll 403
+
+    # Reverse-proxy everything to Lighthouse
+    reverse_proxy lighthouse:7672 {
+        # Pass real client IP so Lighthouse can log and rate-limit correctly
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security headers
+    header {
+        # Prevent click-jacking
+        X-Frame-Options "DENY"
+        # HSTS — only enable after you are confident HTTPS works
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    # Structured access log
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50mb
+            roll_keep 10
+        }
+        format json
+    }
+}

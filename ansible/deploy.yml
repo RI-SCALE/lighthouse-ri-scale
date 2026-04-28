@@ -1,0 +1,19 @@
+---
+# deploy.yml — Lighthouse Trust Anchor deployment playbook
+#
+# Usage:
+#   ansible-playbook -i ansible/inventory.ini ansible/deploy.yml
+#
+# Dry-run (check mode):
+#   ansible-playbook -i ansible/inventory.ini ansible/deploy.yml --check --diff
+#
+# Requirements:
+#   pip install ansible
+#   ansible-galaxy collection install community.docker
+
+- name: Deploy Lighthouse Trust Anchor
+  hosts: trust_anchors
+  gather_facts: true
+
+  roles:
+    - lighthouse

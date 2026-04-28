@@ -1,0 +1,35 @@
+services:
+
+  caddy:
+    image: {{ caddy_image }}
+    container_name: ta-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+      - caddy_logs:/var/log/caddy
+    networks: [ta-net]
+    depends_on:
+      - lighthouse
+
+  lighthouse:
+    image: {{ lighthouse_image }}
+    container_name: ta-lighthouse
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7672:7672"
+    volumes:
+      - ./lighthouse/config.yaml:/config.yaml:ro
+      - ./lighthouse/data:/data
+    networks: [ta-net]
+
+volumes:
+  caddy_logs:
+
+networks:
+  ta-net:
+    name: ta-net
