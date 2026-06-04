@@ -4,10 +4,14 @@
 
 {{ lighthouse_entity_id | regex_replace('^https://', '') }} {
 
-    # Block the admin enrollment endpoint from the public internet.
-    # Use via SSH tunnel: ssh -L 7672:localhost:7672 user@host
-    #   then: curl "http://localhost:7672/enroll?sub=<entity_id>"
+    # Block the legacy admin enrollment endpoint from the public internet.
     respond /enroll 403
+
+    # Block the Admin API from the public internet (defense-in-depth).
+    # The Admin API runs on port 7673 bound to loopback, so it is not normally
+    # routed through Caddy. This rule guards against accidental misconfiguration.
+    # Access via SSH tunnel: ssh -L 7673:localhost:7673 user@host
+    respond /api/v1/admin* 403
 
     # Reverse-proxy everything to Lighthouse
     reverse_proxy lighthouse:7672 {

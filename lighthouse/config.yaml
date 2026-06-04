@@ -1,8 +1,6 @@
 server:
   port: 7672
   # Lighthouse runs behind Caddy (reverse proxy), so TLS is terminated there.
-  # Subordinate management via lhcli inside the container:
-  #   docker exec ta-lighthouse /lhcli -c /config.yaml subordinates add <entity_id>
   trusted_proxies:
     - "172.16.0.0/12"   # default Docker bridge range
     - "127.0.0.1/32"
@@ -10,70 +8,78 @@ server:
 logging:
   level: "info"
 
+# Top-level entity_id (LightHouse 0.20.x).
+# MUST be the exact public HTTPS URL.
+entity_id: "https://CHANGE-ME.example.org"
+
 signing:
-  alg: ES256
-  key_dir: "/data/signing"
-  # auto_generate_keys=true: if federation_ES256.pem is not present at startup
-  # Lighthouse will generate one and persist it in key_dir.
-  # Set to false in production once the key has been generated & backed up.
+  kms: filesystem
+  # Public keys stored in the database (single source of truth, default).
+  pk_backend: db
   auto_generate_keys: true
-  automatic_key_rollover:
-    enabled: false   # enable and tune interval only after the initial key has
-                     # been distributed to federation members out-of-band
+  filesystem:
+    key_dir: "/data/signing"
 
 storage:
-  backend: badger
-  data_dir: "/data/storage"
+  driver: postgres
+  host: ta-postgres
+  port: 5432
+  user: lighthouse
+  db: lighthouse
+  # Password is NEVER stored in this file.
+  # Pass it via LH_STORAGE_PASSWORD environment variable (set in .env).
 
-federation_data:
-  # entity_id MUST be the exact public HTTPS URL.
-  # When deploying via Ansible, this value is rendered from
-  # group_vars/trust_anchors.yml → lighthouse_entity_id.
-  # For manual deploys, replace this with your actual public HTTPS URL.
-  entity_id: "https://CHANGE-ME.example.org"
+# ---------------------------------------------------------------------------
+# Admin API — served on a separate port (7673) so it can be network-isolated.
+# Access via SSH tunnel only:
+#   ssh -L 7673:localhost:7673 user@host
+#   curl http://localhost:7673/api/v1/admin/docs  (Swagger UI)
+# On first start, no authentication is required to create the first admin user.
+# Once a user exists, all requests require HTTP Basic Authentication.
+# ---------------------------------------------------------------------------
+api:
+  admin:
+    enabled: true
+    users_enabled: true
+    port: 7673
 
-  # As a Trust Anchor we have no superior — authority_hints is therefore omitted.
-
-  # Lifetime of the self-signed Entity Configuration JWT.
-  # 1 day is safe for production; relying parties cache this.
-  configuration_lifetime: "1d"
-
-  federation_entity_metadata:
-    organization_name: "GRNET – Greek Research and Technology Network"
-    display_name: "RI Federation Trust Anchor (DEP)"
-    description: >
-      Development/testing Trust Anchor for the Research Infrastructure
-      OpenID Federation operated by GRNET.
-    contacts:
-      - "aai-support@grnet.gr"
-    homepage_uri: "https://aai.grnet.gr"
+# ---------------------------------------------------------------------------
+# Statistics — enabled.
+# Collects per-request metrics for all federation endpoints.
+# ---------------------------------------------------------------------------
+stats:
+  enabled: true
+  buffer:
+    size: 10000
+    flush_interval: "10s"
+    flush_threshold: 0.8
+  capture:
+    client_ip: true
+    user_agent: true
+    query_params: true
+  retention:
+    detailed_days: 90
+    aggregated_days: 365
 
 endpoints:
   fetch:
     path: "/fetch"
-    # statement_lifetime defaults to ~1 week; explicit here for clarity
-    statement_lifetime: "7d"
 
   list:
     path: "/list"
 
   resolve:
     path: "/resolve"
-    # This Trust Anchor is its own root — allow it as the only trust anchor
-    # for resolution requests.
     allowed_trust_anchors:
       - "https://CHANGE-ME.example.org"
     grace_period: "1h"
     time_elapsed_grace_factor: 0.75
 
   enroll_request:
-    # Subordinate entities submit enrolment requests here;
-    # an admin approves them interactively via lhcli (requires brief downtime).
     path: "/enroll-request"
 
   enroll:
-    # Admin-only enrollment endpoint — runs inside the server process.
-    # NOT exposed publicly — Caddy blocks it. Access via SSH tunnel only:
-    #   ssh -L 7672:localhost:7672 <user>@<host>
-    #   curl "http://localhost:7672/enroll?sub=https://example.org/entity"
+    # Legacy admin enrollment path — kept for backward compatibility.
+    # Prefer the Admin API (port 7673) for managing subordinates.
+    # Caddy blocks this path from the public internet.
     path: "/enroll"

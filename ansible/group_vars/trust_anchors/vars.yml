@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# group_vars/trust_anchors.yml
+# Variables for all hosts in the [trust_anchors] inventory group.
+# Sensitive values (passwords, tokens) MUST be stored in an Ansible Vault
+# file: ansible/group_vars/trust_anchors/vault.yml
+# Create it with: cp ansible/group_vars/vault.yml.example ansible/group_vars/trust_anchors/vault.yml
+# then:           ansible-vault encrypt ansible/group_vars/trust_anchors/vault.yml
+# ---------------------------------------------------------------------------
+
+# Public HTTPS Entity ID — must match the DNS name and TLS certificate CN.
+lighthouse_entity_id: "https://trust-anchor.dep.dev.rciam.grnet.gr"
+
+# Directory on the remote host where the project is deployed.
+deploy_dir: "/opt/lighthouse-ta"
+
+# Docker Compose project name
+compose_project: "lighthouse-ta"
+
+# Lighthouse image tag
+lighthouse_image: "oidfed/lighthouse:0.20.3"
+
+# Caddy image tag
+caddy_image: "caddy:2-alpine"
+
+# PostgreSQL image tag
+postgres_image: "postgres:16-alpine"
+
+# PostgreSQL database name and user (non-secret).
+# The password is stored in the Vault: vault_postgres_password
+lighthouse_pg_user: "lighthouse"
+lighthouse_pg_db: "lighthouse"
+
+# User/group that will own the deployed files and run docker compose.
+# Must be a member of the 'docker' group on the host.
+deploy_user: "YOUR_SSH_USER"
+deploy_group: "YOUR_SSH_USER"

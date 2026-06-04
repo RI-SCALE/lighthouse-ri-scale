@@ -11,10 +11,15 @@
 # The VM must be reachable on both ports from the internet for ACME to work.
 
 CHANGE-ME.example.org {
-    # Block the admin enrollment endpoint from the public internet.
-    # Use via SSH tunnel: ssh -L 7672:localhost:7672 user@host
-    #   then: curl "http://localhost:7672/enroll?sub=<entity_id>"
+    # Block the legacy admin enrollment endpoint from the public internet.
     respond /enroll 403
+
+    # Block the Admin API from the public internet (defense-in-depth).
+    # The Admin API runs on a separate port (7673) bound to loopback, so it
+    # is not routed through Caddy under normal configuration. This rule guards
+    # against accidental misconfiguration (e.g., admin_port=0).
+    # Access via SSH tunnel: ssh -L 7673:localhost:7673 user@host
+    respond /api/v1/admin* 403
 
     # Reverse-proxy everything to Lighthouse
     reverse_proxy lighthouse:7672 {
