@@ -93,7 +93,7 @@
   loop:
     - "{{ deploy_dir }}"
     - "{{ deploy_dir }}/lighthouse/data/signing"
-    - "{{ deploy_dir }}/lighthouse/data/storage"   # kept for legacy migration only
+    - "{{ deploy_dir }}/lighthouse/data/storage"   # legacy BadgerDB dir — kept so re-runs don't error if it still exists
     - "{{ deploy_dir }}/caddy/data"
     - "{{ deploy_dir }}/caddy/config"
     - "{{ deploy_dir }}/postgres/data"

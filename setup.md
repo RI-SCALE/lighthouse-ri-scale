@@ -47,8 +47,8 @@ Internet
              ▼
 ┌─────────────────────────────────────┐
 │  Lighthouse (ta-lighthouse)         │  ← OpenID Federation Trust Anchor
-│  oidfed/lighthouse:main             │
-│  127.0.0.1:7672 (loopback only)     │  ← admin access via SSH tunnel
+│  oidfed/lighthouse:0.20.3           │
+│  127.0.0.1:7673 (Admin API)         │  ← SSH tunnel only (see ADMIN_API.md)
 └─────────────────────────────────────┘
 ```
 
@@ -266,76 +266,54 @@ both.
 
 ## 7. Enrolling Subordinate Entities
 
+> **Full reference:** [ADMIN_API.md](../ADMIN_API.md)
+
 ### 7.1 How enrollment works
 
-Lighthouse provides two enrollment mechanisms:
+Lighthouse 0.20.x provides three ways to manage subordinates:
 
-| Mechanism | Path | Who uses it | Downtime? |
-|---|---|---|---|
-| **`/enroll`** | HTTP GET, admin-only | TA admin via SSH tunnel | None |
-| **`/enroll-request`** | HTTP GET, public | Subordinate self-service | None |
+| Method | Interface | Recommended for |
+|---|---|---|
+| **Admin API** | `POST /api/v1/admin/subordinates` on port 7673 | All new operations — enroll, remove, re-enroll |
+| **`/enroll`** (legacy) | `GET /enroll?sub=...` on port 7672 | Quick one-off enroll; no auth beyond the SSH tunnel |
+| **`/enroll-request`** | `GET /enroll-request?sub=...` (public) | Subordinate self-service; request stays `pending` until admin approval |
 
-**`/enroll`** is the primary admin tool. It fetches and verifies the
-subordinate's Entity Configuration, extracts its JWKS, and immediately
-writes it to the database — all within the running server process. There is
-**no database lock conflict** and **no downtime**.
+All three methods fetch and verify the subordinate's Entity Configuration
+live, extract the JWKS, and write to the PostgreSQL database — no downtime.
 
-**`/enroll-request`** allows a subordinate to submit their own enrollment
-request. The request stays in a `pending` state until an admin approves it
-(currently requires `lhcli` with a container stop — not recommended for
-production; prefer the `/enroll` flow below).
+### 7.2 Prerequisites: SSH tunnel to Admin API
 
-> **Note:** `lhcli` (the CLI tool bundled in the container at `/lhcli`)
-> opens the Badger database directly and **cannot run while the server is
-> running** — it will fail with `Cannot acquire directory lock`. Prefer the
-> `/enroll` HTTP endpoint instead.
-
-### 7.2 Prerequisites: SSH tunnel
-
-The `/enroll` endpoint is blocked by Caddy on port 443 (returns HTTP 403).
-It is only reachable on port 7672, which is bound to the VM's loopback
-interface (`127.0.0.1:7672`). Access requires an SSH tunnel.
-
-**Open the tunnel** (keep this terminal open while enrolling):
+The Admin API runs on port 7673, bound to the VM's loopback interface.
+Access requires an SSH tunnel.
 
 ```bash
-ssh -L 7672:localhost:7672 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
+# Open the tunnel (keep this terminal open)
+ssh -L 7673:localhost:7673 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
 ```
 
-Verify the tunnel works:
+Verify:
 
 ```bash
-# Linux / macOS / WSL
-curl -s http://localhost:7672/.well-known/openid-federation | head -c 80
-
-# Windows PowerShell
-curl.exe -s http://localhost:7672/.well-known/openid-federation
+curl -s -o /dev/null -w '%{http_code}' http://localhost:7673/api/v1/admin/docs
+# Expected: 200
 ```
 
-You should get the same JWT as from the public HTTPS endpoint.
-
-### 7.3 Enroll a subordinate
-
-With the SSH tunnel open, in a **separate terminal**:
+### 7.3 Enroll a subordinate (Admin API)
 
 ```bash
-# Linux / macOS / WSL
-curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
-
-# Windows PowerShell (use curl.exe — not the Invoke-WebRequest alias)
-curl.exe -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
+curl -s -u "admin:YOUR_PASSWORD" \
+  -X POST http://localhost:7673/api/v1/admin/subordinates \
+  -H 'Content-Type: application/json' \
+  -d '{"entity_identifier":"https://some-idp.example.org"}'
+# Expected: 201 Created
 ```
-
-**Expected response:** HTTP `201 Created` with a signed Entity Statement JWT
-as the body. This confirms the subordinate has been enrolled and the TA has
-issued a statement for them.
 
 **Error responses:**
 
 | Status | Meaning |
 |---|---|
-| `400 Bad Request` | Could not fetch or verify the subordinate's Entity Configuration — check their `/.well-known/openid-federation` is reachable and valid |
-| `403 Forbidden` | You hit port 443 (Caddy blocked it) — use the SSH tunnel on port 7672 |
+| `400 Bad Request` | Could not fetch or verify the subordinate's Entity Configuration — check their `/.well-known/openid-federation` is reachable and returns a valid JWT |
+| `409 Conflict` | Already enrolled — re-POST to update (idempotent) |
 
 ### 7.4 Verify enrollment
 
@@ -343,34 +321,41 @@ issued a statement for them.
 # List all enrolled subordinates
 curl -s https://trust-anchor.dep.dev.rciam.grnet.gr/list
 
-# Fetch the statement for a specific subordinate
+# Fetch the signed statement for a specific subordinate
 curl -s "https://trust-anchor.dep.dev.rciam.grnet.gr/fetch?sub=https://some-idp.example.org"
 
 # Resolve the full trust chain (end-to-end test)
 curl -s "https://trust-anchor.dep.dev.rciam.grnet.gr/resolve?sub=https://some-idp.example.org&trust_anchor=https://trust-anchor.dep.dev.rciam.grnet.gr"
 ```
 
-The `/resolve` call is the definitive end-to-end test — a `200 OK` with a
-JWT means the full chain from the subordinate to the TA validates correctly.
+The `/resolve` call is the definitive end-to-end test — `200 OK` with a JWT
+means the full chain from the subordinate to the TA validates correctly.
 
-### 7.5 Remove a subordinate
-
-There is currently no HTTP endpoint to remove a subordinate. This requires
-briefly stopping the container to release the Badger database lock:
+### 7.5 Remove a subordinate (Admin API)
 
 ```bash
-# On the VM
-cd /opt/lighthouse-ta
-sudo docker compose stop lighthouse
-
-sudo docker run --rm \
-  -v /opt/lighthouse-ta/lighthouse/config.yaml:/config.yaml:ro \
-  -v /opt/lighthouse-ta/lighthouse/data:/data \
-  oidfed/lighthouse:main \
-  /lhcli -c /config.yaml subordinates remove https://some-idp.example.org
-
-sudo docker compose start lighthouse
+# URL-encode the entity identifier in the path
+curl -s -u "admin:YOUR_PASSWORD" -X DELETE \
+  "http://localhost:7673/api/v1/admin/subordinates/https%3A%2F%2Fsome-idp.example.org"
+# Expected: 204 No Content
 ```
+
+### 7.6 Legacy: `/enroll` endpoint
+
+The `/enroll` GET endpoint is retained for backward compatibility.  It is
+blocked by Caddy on port 443 and requires an SSH tunnel to port **7672**
+(the main federation server port, separate from the Admin API port 7673).
+
+```bash
+# Tunnel to port 7672
+ssh -L 7672:localhost:7672 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
+
+# Enroll (in a second terminal)
+curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
+```
+
+This endpoint can only enroll — it cannot remove, list, or manage metadata.
+Use the Admin API for all other operations.
 
 ---
 
@@ -483,7 +468,7 @@ sudo docker compose up -d lighthouse
 | Path | Contents | Frequency |
 |---|---|---|
 | `lighthouse/data/signing/*.pem` | Signing private keys | Once + after any rotation |
-| `lighthouse/data/storage/` | Badger DB (enrolled entities) | Daily |
+| `postgres_data` Docker volume | Enrolled entities, metadata, signing key history | Daily |
 | `caddy/data/` | TLS cert + ACME account | Weekly (auto-renews anyway) |
 
 ### Auto-start on reboot
@@ -525,13 +510,6 @@ ssh -L 7672:localhost:7672 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
 # then in another terminal:
 curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
 ```
-
-### `lhcli` fails with "Cannot acquire directory lock"
-
-`lhcli` opens the Badger database directly and cannot run while the
-Lighthouse server is running. Use the `/enroll` HTTP endpoint instead
-(see §7.2–7.3). The `lhcli` tool is only needed for removal (§7.6),
-which requires a brief container stop.
 
 ### Caddy fails to obtain TLS certificate
 

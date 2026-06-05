@@ -67,9 +67,6 @@ lighthouse/
   config.yaml                # static reference — rendered from config.yaml.j2 on deploy
   data/                      # signing keys (gitignored, created on deploy)
 docker-compose.yml           # static reference — rendered from docker-compose.yml.j2 on deploy
-migration/                   # one-time migration tooling (gitignored)
-  RUNBOOK.md                 # short, pre-filled command guide
-  migrate.sh                 # automated migration script
 ```
 
 ---
@@ -146,51 +143,47 @@ curl -s https://trust-anchor.dep.dev.rciam.grnet.gr/list
 
 ## Admin API
 
-Lighthouse exposes an Admin API on port `7673` for managing subordinate entities,
-federation metadata, signing key rotation, and statistics.
+Lighthouse 0.20.x exposes a REST Admin API on port `7673` for managing
+subordinate entities, federation metadata, signing key rotation, and statistics.
+This is the **primary management interface** — it replaces the legacy `lhcli`
+CLI tool and the `/enroll` HTTP endpoint.
 
-**Port 7673 is bound to loopback only** (`127.0.0.1:7673:7673`) and is additionally
-blocked by Caddy on port 443. Access it exclusively via SSH tunnel.
+**Port 7673 is bound to loopback only** (`127.0.0.1:7673:7673`) and is
+additionally blocked by Caddy on port 443. Access it exclusively via SSH tunnel.
 
-### Open a tunnel
+> **Full runbook:** [ADMIN_API.md](ADMIN_API.md)
+
+### Quick start
 
 ```bash
+# 1. Open tunnel (keep open for the session)
 ssh -L 7673:localhost:7673 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
-```
 
-### Create the first admin user (once)
+# 2. Swagger UI — open in browser
+#    http://localhost:7673/api/v1/admin/docs
 
-```bash
+# 3. Create the first admin user (no auth required for first user only)
 curl -s -X POST http://localhost:7673/api/v1/admin/users \
-  -H "Content-Type: application/json" \
+  -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"YOUR_STRONG_PASSWORD"}'
-```
 
-After the first user exists, Basic Auth is required for all Admin API calls.
-
-### Swagger UI (interactive docs)
-
-With the tunnel open, browse to: [http://localhost:7673/api/v1/admin/docs](http://localhost:7673/api/v1/admin/docs)
-
-### Common operations
-
-```bash
-# Enroll a subordinate
+# 4. Enroll a subordinate
 curl -s -u "admin:PASSWORD" -X POST \
   http://localhost:7673/api/v1/admin/subordinates \
-  -H "Content-Type: application/json" \
+  -H 'Content-Type: application/json' \
   -d '{"entity_identifier":"https://some-idp.example.org"}'
 
-# List subordinates
+# 5. List subordinates
 curl -s -u "admin:PASSWORD" \
   http://localhost:7673/api/v1/admin/subordinates | python3 -m json.tool
 
-# Remove a subordinate
+# 6. Remove a subordinate
 curl -s -u "admin:PASSWORD" -X DELETE \
   "http://localhost:7673/api/v1/admin/subordinates/https%3A%2F%2Fsome-idp.example.org"
 ```
 
-See the Swagger UI for the full API surface, including metadata management and statistics.
+See [ADMIN_API.md](ADMIN_API.md) for the full API surface: users, metadata
+management, lifetimes, JWT decoding, and the legacy `/enroll` endpoint.
 
 ---
 

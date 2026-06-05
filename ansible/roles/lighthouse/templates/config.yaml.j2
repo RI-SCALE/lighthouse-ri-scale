@@ -6,15 +6,19 @@ server:
     - "127.0.0.1/32"
 
 logging:
-  level: "debug"
+  internal:
+    level: "debug"
+    stderr: true
 
 # Top-level entity_id (LightHouse 0.20.x format).
 entity_id: "{{ lighthouse_entity_id }}"
 
 signing:
   kms: filesystem
-  # Public keys: temporarily use filesystem until migration loads them into PostgreSQL
-  pk_backend: filesystem
+  # Public keys in PostgreSQL — set during initial deploy and correct post-migration.
+  # lhmigrate keys-kms stores migrated public keys in DB (--pks-type=db);
+  # fresh deployments with auto_generate_keys: true also write to DB automatically.
+  pk_backend: db
   # On first Ansible run (no keys present): true so Lighthouse generates them.
   # On subsequent runs: false so existing keys are never replaced.
   auto_generate_keys: {{ 'false' if signing_key.stat.exists else 'true' }}
