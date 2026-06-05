@@ -1,52 +1,71 @@
 server:
   port: 7672
   # Lighthouse runs behind Caddy (reverse proxy) — TLS is terminated there.
-  # Subordinate management is done via lhcli inside the container:
-  #   docker exec ta-lighthouse /lhcli -c /config.yaml subordinates add <entity_id>
   trusted_proxies:
     - "172.16.0.0/12"   # default Docker bridge range
     - "127.0.0.1/32"
 
 logging:
-  level: "info"
+  internal:
+    level: "debug"
+    stderr: true
+
+# Top-level entity_id (LightHouse 0.20.x format).
+entity_id: "{{ lighthouse_entity_id }}"
 
 signing:
-  alg: ES256
-  key_dir: "/data/signing"
+  kms: filesystem
+  # Public keys in PostgreSQL — set during initial deploy and correct post-migration.
+  # lhmigrate keys-kms stores migrated public keys in DB (--pks-type=db);
+  # fresh deployments with auto_generate_keys: true also write to DB automatically.
+  pk_backend: db
   # On first Ansible run (no keys present): true so Lighthouse generates them.
-  # On subsequent runs: false so the already-generated keys are never replaced.
-  # The ansible task flips this automatically based on whether the key exists.
+  # On subsequent runs: false so existing keys are never replaced.
   auto_generate_keys: {{ 'false' if signing_key.stat.exists else 'true' }}
-  automatic_key_rollover:
-    enabled: false   # enable only after the initial key has been distributed
-                     # to federation members out-of-band
+  filesystem:
+    key_dir: "/data/signing"
 
 storage:
-  backend: badger
-  data_dir: "/data/storage"
+  driver: postgres
+  debug: true
+  dsn: "host=ta-postgres user={{ lighthouse_pg_user }} dbname={{ lighthouse_pg_db }} port=5432 sslmode=disable"
+  # Password is injected via LH_STORAGE_DSN environment variable which overrides this
 
-federation_data:
-  # entity_id MUST be the exact public HTTPS URL — rendered by Ansible.
-  entity_id: "{{ lighthouse_entity_id }}"
+# ---------------------------------------------------------------------------
+# Admin API — on a separate port (7673) so it is network-isolated from the
+# main federation server. Caddy never proxies to this port.
+# Access via SSH tunnel: ssh -L 7673:localhost:7673 user@host
+# On first start, create the initial admin user with:
+#   curl -X POST http://localhost:7673/api/v1/admin/users \
+#     -H 'Content-Type: application/json' \
+#     -d '{"username":"admin","password":"<strong-password>"}'
+# ---------------------------------------------------------------------------
+api:
+  admin:
+    enabled: true
+    users_enabled: true
+    port: 7673
 
-  # As a Trust Anchor we have no superior — authority_hints is omitted.
-
-  configuration_lifetime: "1d"
-
-  federation_entity_metadata:
-    organization_name: "GRNET – Greek Research and Technology Network"
-    display_name: "RI Federation Trust Anchor (DEP)"
-    description: >
-      Development/testing Trust Anchor for the Research Infrastructure
-      OpenID Federation operated by GRNET.
-    contacts:
-      - "aai-support@grnet.gr"
-    homepage_uri: "https://aai.grnet.gr"
+# ---------------------------------------------------------------------------
+# Statistics — enabled.
+# ---------------------------------------------------------------------------
+stats:
+  enabled: true
+  buffer:
+    size: 10000
+    flush_interval: "10s"
+    flush_threshold: 0.8
+  capture:
+    client_ip: true
+    user_agent: true
+    query_params: true
+  retention:
+    detailed_days: 90
+    aggregated_days: 365
 
 endpoints:
   fetch:
     path: "/fetch"
-    statement_lifetime: "7d"
 
   list:
     path: "/list"
@@ -62,8 +81,7 @@ endpoints:
     path: "/enroll-request"
 
   enroll:
-    # Admin-only enrollment endpoint — runs inside the server process.
-    # NOT exposed publicly — Caddy blocks it. Access via SSH tunnel only:
-    #   ssh -L 7672:localhost:7672 <user>@<host>
-    #   curl "http://localhost:7672/enroll?sub=https://example.org/entity"
+    # Legacy admin enrollment path — kept for backward compat.
+    # Prefer the Admin API (port 7673) for managing subordinates.
+    # Caddy blocks this path from the public internet.
     path: "/enroll"

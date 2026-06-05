@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# ansible/group_vars/trust_anchors/vault.yml.example
+#
+# This file shows the STRUCTURE of the Ansible Vault file.
+# Copy it to the trust_anchors group_vars directory, fill in real values, and encrypt:
+#
+#   cp ansible/group_vars/vault.yml.example ansible/group_vars/trust_anchors/vault.yml
+#   ansible-vault encrypt ansible/group_vars/trust_anchors/vault.yml
+#
+# vault.yml is git-ignored and must NEVER be committed unencrypted.
+# To edit an encrypted vault: ansible-vault edit ansible/group_vars/trust_anchors/vault.yml
+# To view:                     ansible-vault view  ansible/group_vars/trust_anchors/vault.yml
+# ---------------------------------------------------------------------------
+
+# PostgreSQL superuser password for the Lighthouse database.
+# Use a strong random value, e.g.:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+vault_postgres_password: "CHANGE_ME_strong_random_password"

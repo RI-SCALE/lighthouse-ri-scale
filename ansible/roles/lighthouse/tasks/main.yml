@@ -93,9 +93,10 @@
   loop:
     - "{{ deploy_dir }}"
     - "{{ deploy_dir }}/lighthouse/data/signing"
-    - "{{ deploy_dir }}/lighthouse/data/storage"
+    - "{{ deploy_dir }}/lighthouse/data/storage"   # legacy BadgerDB dir — kept so re-runs don't error if it still exists
     - "{{ deploy_dir }}/caddy/data"
     - "{{ deploy_dir }}/caddy/config"
+    - "{{ deploy_dir }}/postgres/data"
   become: true
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,19 @@
   become: true
   notify: Restart lighthouse stack
 
+# Deploy .env from Vault-backed template.
+# Contains database credentials — must be owner-readable only (0600).
+- name: Deploy .env (database credentials from Vault)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ deploy_dir }}/.env"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_group }}"
+    mode: "0600"
+  become: true
+  no_log: true   # prevent vault secrets appearing in Ansible output
+  notify: Restart lighthouse stack
+
 # ---------------------------------------------------------------------------
 # 5. Docker images + stack
 # ---------------------------------------------------------------------------
@@ -168,9 +182,9 @@
 - name: Wait for Lighthouse to be ready
   ansible.builtin.wait_for:
     host: 127.0.0.1
-    port: 443
-    delay: 5
-    timeout: 60
+    port: 7672
+    delay: 5          
+    timeout: 120
   become: true
 
 - name: Verify TLS certificate and federation metadata endpoint

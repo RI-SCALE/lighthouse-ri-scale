@@ -7,28 +7,39 @@ Ansible-based deployment of a [Lighthouse](https://github.com/go-oidfed/lighthou
 
 ---
 
-## What this is
+## Stack
 
-This repository contains everything needed to deploy and operate a production-grade
-OpenID Federation Trust Anchor. The stack is:
+| Component | Version | Role |
+|---|---|---|
+| [Lighthouse](https://github.com/go-oidfed/lighthouse) | `v0.20.3` (pinned) | OpenID Federation engine — Trust Anchor, statement signer, resolver |
+| [PostgreSQL](https://www.postgresql.org/) | `16-alpine` | Primary storage (entities, signing keys, statistics) |
+| [Caddy](https://caddyserver.com/) | `2-alpine` | TLS termination, automatic Let's Encrypt, reverse proxy |
+| Docker Compose | — | Container orchestration |
+| Ansible | ≥ 2.15 | Automated, idempotent deployment |
 
-- **[Lighthouse](https://github.com/go-oidfed/lighthouse)** — the federation engine
-  (Trust Anchor, entity statement signer, resolver)
-- **[Caddy](https://caddyserver.com/)** — reverse proxy handling TLS termination
-  and automatic certificate renewal via Let's Encrypt
-- **Docker Compose** — container orchestration
-- **Ansible** — automated, idempotent deployment recipe
+---
+
+## Architecture
 
 ```
 Internet  :443
     │
     ▼
-  Caddy  (TLS, Let's Encrypt)
-    │  :7672 (internal)
+  Caddy  (TLS, Let's Encrypt, rate limiting)
+    │  :7672 (Lighthouse main — federation API)
     ▼
-  Lighthouse  (OpenID Federation TA)
-    ← admin access via SSH tunnel on 127.0.0.1:7672
+  Lighthouse v0.20.3
+    │  :5432 (internal)
+    ▼
+  PostgreSQL 16
+
+  Admin API on 127.0.0.1:7673  ← SSH tunnel only, never exposed publicly
+  /enroll                       ← blocked by Caddy (403)
+  /api/v1/admin/*               ← blocked by Caddy (403, defense-in-depth)
 ```
+
+Signing keys are stored on the host filesystem (`/opt/lighthouse-ta/lighthouse/data/signing`)
+and inside PostgreSQL (`pk_backend: db`). Caddy obtains and renews TLS certificates automatically.
 
 ---
 
@@ -36,109 +47,165 @@ Internet  :443
 
 ```
 ansible/
-  deploy.yml              # main playbook
-  inventory.ini           # target host(s)
+  deploy.yml                 # main playbook
+  inventory.ini              # target host(s)
+  requirements.yml           # Ansible Galaxy dependencies
   group_vars/
-    trust_anchors.yml     # deployment variables (entity_id, image tags, etc.)
+    trust_anchors.yml        # deployment variables (entity_id, image, postgres config, etc.)
+    vault.yml                # Ansible Vault — secrets (gitignored, see vault.yml.example)
+    vault.yml.example        # template for vault.yml
   roles/lighthouse/
-    tasks/main.yml        # install Docker, create dirs, render config, start stack
-    templates/            # Jinja2 templates for config.yaml, Caddyfile, docker-compose.yml
+    tasks/main.yml           # install Docker, create dirs, render config, (re)start stack
+    templates/
+      config.yaml.j2         # Lighthouse config template
+      docker-compose.yml.j2  # Compose template (postgres + lighthouse + caddy)
+      Caddyfile.j2           # Caddy config template
+      env.j2                 # .env template (credentials, mode 0600)
 caddy/
-  Caddyfile               # static reference — rendered from templates/Caddyfile.j2 on deploy
+  Caddyfile                  # static reference — rendered from Caddyfile.j2 on deploy
 lighthouse/
-  config.yaml             # static reference — rendered from templates/config.yaml.j2 on deploy
-  data/                   # signing keys + Badger DB (gitignored, created on deploy)
-docker-compose.yml        # static reference — rendered from templates/docker-compose.yml.j2
-setup.md                  # full operational guide
+  config.yaml                # static reference — rendered from config.yaml.j2 on deploy
+  data/                      # signing keys (gitignored, created on deploy)
+docker-compose.yml           # static reference — rendered from docker-compose.yml.j2 on deploy
 ```
 
 ---
 
-## Quick start
-
-### Prerequisites
+## Prerequisites
 
 | Where | Requirement |
 |---|---|
 | Control node | Ansible ≥ 2.15 (`pip install ansible`) |
-| Control node | `community.docker` collection (`ansible-galaxy collection install -r ansible/requirements.yml`) |
+| Control node | `community.docker` Ansible collection |
 | Control node | SSH key with `sudo` access to the target VM |
 | Target VM | Debian 12 x86_64, ports 22 / 80 / 443 open |
 
 > Docker is installed automatically by the playbook — no manual prep on the VM needed.
 
-### 1. Configure
+---
 
-Edit `ansible/group_vars/trust_anchors.yml`:
+## Deploy
 
-```yaml
-lighthouse_entity_id: "https://your-domain.example.org"   # must match DNS + TLS cert
-deploy_dir: "/opt/lighthouse-ta"
-lighthouse_image: "oidfed/lighthouse:main"
+### 1. Configure Ansible Vault (first time only)
+
+The database password is stored in an Ansible Vault file and is never written to
+any config file in plain text. It is injected into `.env` on the host (mode `0600`).
+
+```bash
+cp ansible/group_vars/vault.yml.example ansible/group_vars/trust_anchors/vault.yml
+# Edit vault.yml — set vault_postgres_password to a strong random string:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+ansible-vault encrypt ansible/group_vars/trust_anchors/vault.yml
 ```
 
-Edit `ansible/inventory.ini` with your VM's hostname/IP.
+### 2. Review deployment variables
 
-### 2. Deploy
+Edit `ansible/group_vars/trust_anchors.yml` to confirm:
+
+```yaml
+lighthouse_entity_id: "https://trust-anchor.dep.dev.rciam.grnet.gr"
+lighthouse_image: "oidfed/lighthouse:0.20.3"
+deploy_dir: "/opt/lighthouse-ta"
+```
+
+Edit `ansible/inventory.ini` with the VM's hostname or IP.
+
+### 3. Install Ansible dependencies
 
 ```bash
 ansible-galaxy collection install -r ansible/requirements.yml
-
-ansible-playbook -i ansible/inventory.ini ansible/deploy.yml \
-    -u YOUR_SSH_USER \
-    -e deploy_user=YOUR_SSH_USER \
-    -e deploy_group=YOUR_SSH_USER \
-    --private-key ~/.ssh/your_key
 ```
 
-### 3. Verify
+### 4. Run the playbook
 
 ```bash
-# Entity Configuration (self-signed JWT)
-curl -s https://your-domain.example.org/.well-known/openid-federation
+ansible-playbook -i ansible/inventory.ini ansible/deploy.yml \
+  -u YOUR_SSH_USER \
+  -e deploy_user=YOUR_SSH_USER \
+  -e deploy_group=YOUR_SSH_USER \
+  --ask-vault-pass
+```
+
+The playbook is **idempotent** — safe to re-run for updates and config changes.
+Container restarts are triggered automatically when the rendered config changes.
+
+### 5. Verify
+
+```bash
+# Entity Configuration (signed JWT)
+curl -s https://trust-anchor.dep.dev.rciam.grnet.gr/.well-known/openid-federation | head -c 200
 
 # List enrolled subordinates
-curl -s https://your-domain.example.org/list
-
-# Full trust chain resolution
-curl -s "https://your-domain.example.org/resolve?sub=https://some-idp.example.org&trust_anchor=https://your-domain.example.org"
+curl -s https://trust-anchor.dep.dev.rciam.grnet.gr/list
 ```
 
 ---
 
-## Enrolling subordinates
+## Admin API
 
-Subordinate enrollment is done via the `/enroll` HTTP endpoint.
+Lighthouse 0.20.x exposes a REST Admin API on port `7673` for managing
+subordinate entities, federation metadata, signing key rotation, and statistics.
+This is the **primary management interface** — it replaces the legacy `lhcli`
+CLI tool and the `/enroll` HTTP endpoint.
 
-The endpoint is **blocked by Caddy on port 443**. Access it via SSH tunnel:
+**Port 7673 is bound to loopback only** (`127.0.0.1:7673:7673`) and is
+additionally blocked by Caddy on port 443. Access it exclusively via SSH tunnel.
+
+> **Full runbook:** [ADMIN_API.md](ADMIN_API.md)
+
+### Quick start
 
 ```bash
-# 1. Open tunnel (keep open)
-ssh -L 7672:localhost:7672 YOUR_USER@your-domain.example.org
+# 1. Open tunnel (keep open for the session)
+ssh -L 7673:localhost:7673 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
 
-# 2. Enroll (in another terminal)
-curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
-# Expected: HTTP 201 Created + signed Entity Statement JWT
+# 2. Swagger UI — open in browser
+#    http://localhost:7673/api/v1/admin/docs
+
+# 3. Create the first admin user (no auth required for first user only)
+curl -s -X POST http://localhost:7673/api/v1/admin/users \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"YOUR_STRONG_PASSWORD"}'
+
+# 4. Enroll a subordinate
+curl -s -u "admin:PASSWORD" -X POST \
+  http://localhost:7673/api/v1/admin/subordinates \
+  -H 'Content-Type: application/json' \
+  -d '{"entity_identifier":"https://some-idp.example.org"}'
+
+# 5. List subordinates
+curl -s -u "admin:PASSWORD" \
+  http://localhost:7673/api/v1/admin/subordinates | python3 -m json.tool
+
+# 6. Remove a subordinate
+curl -s -u "admin:PASSWORD" -X DELETE \
+  "http://localhost:7673/api/v1/admin/subordinates/https%3A%2F%2Fsome-idp.example.org"
 ```
 
-See [`setup.md § 7`](setup.md#7-enrolling-subordinate-entities) for full details,
-error reference, and the removal procedure.
+See [ADMIN_API.md](ADMIN_API.md) for the full API surface: users, metadata
+management, lifetimes, JWT decoding, and the legacy `/enroll` endpoint.
 
 ---
 
-## Documentation
+## Federation endpoints (public)
 
-Full operational documentation is in **[setup.md](setup.md)**:
+| Endpoint | Description |
+|---|---|
+| `/.well-known/openid-federation` | Signed Entity Configuration JWT |
+| `/list` | List of enrolled subordinate entity identifiers |
+| `/fetch?sub=<entity_id>` | Signed Entity Statement for a specific subordinate |
+| `/resolve?sub=<entity_id>&trust_anchor=<ta>` | Full trust chain resolution |
 
-- Architecture and design decisions
-- First-deploy vs. re-deploy behaviour
-- Signing key management and backup
-- Public key extraction and distribution to federation members
-- Subordinate enrollment and removal
-- Key rotation procedure
-- Operations, maintenance, and log access
-- Hardening checklist
-- Troubleshooting
+---
+
+## Secrets summary
+
+| Secret | Location | Vault key |
+|---|---|---|
+| PostgreSQL password | `ansible/group_vars/trust_anchors/vault.yml` (gitignored) | `vault_postgres_password` |
+| Admin API password | Set manually after deploy (not stored in repo) | — |
+| TLS private key | Managed by Caddy in `caddy/data/` (gitignored) | — |
+| Signing keys | `lighthouse/data/signing/` (gitignored) | — |
 
 ---
 
@@ -149,4 +216,5 @@ Full operational documentation is in **[setup.md](setup.md)**:
 | Lighthouse GitHub | <https://github.com/go-oidfed/lighthouse> |
 | Lighthouse documentation | <https://go-oidfed.github.io/lighthouse/> |
 | Configuration reference | <https://go-oidfed.github.io/lighthouse/config/> |
+| Admin API reference | <https://go-oidfed.github.io/lighthouse/api/admin/> |
 | Docker Hub image | <https://hub.docker.com/r/oidfed/lighthouse> |
