@@ -5,8 +5,12 @@
 > **Interactive docs (Swagger UI):** `http://localhost:7673/api/v1/admin/docs`
 
 The Admin API is the primary management interface for Lighthouse 0.20.x — it
-replaces the old `lhcli` CLI tool and the legacy `/enroll` HTTP endpoint for
-day-to-day operations.
+replaces the old `lhcli` CLI tool for day-to-day operations (users, metadata,
+lifetimes, key management, removal).
+
+> **Enrollment note:** the Admin API does *not* fetch a subordinate's keys
+> automatically — see §5. To enroll a live entity by auto-fetching its keys,
+> the `/enroll` endpoint (§9) remains the simplest path.
 
 ---
 
@@ -112,24 +116,37 @@ curl -s -u "$CREDS" \
 
 ### Enroll a new subordinate
 
-Lighthouse fetches the subordinate's Entity Configuration from their
-`/.well-known/openid-federation`, verifies it, and stores the JWKS in the
-database. No downtime; the server keeps running.
+> **Important:** the Admin API does **not** fetch the subordinate's keys for
+> you. The request field is `entity_id`, and the default `status` is `active`,
+> which **requires a `jwks` in the body**. If you POST only an `entity_id` you
+> will get `{"error":"invalid_request","error_description":"status cannot be
+> active without keys"}`. To enroll by automatically fetching the entity's keys
+> from its `/.well-known/openid-federation`, use the `/enroll` endpoint instead
+> (§9) — that is the only path that auto-fetches, and the recommended way to
+> enroll a live entity.
+
+To enroll through the Admin API you must supply the JWKS inline:
 
 ```bash
 curl -s -u "$CREDS" \
   -X POST http://localhost:7673/api/v1/admin/subordinates \
   -H 'Content-Type: application/json' \
-  -d '{"entity_identifier":"https://some-idp.example.org"}'
+  -d '{
+        "entity_id": "https://some-idp.example.org",
+        "jwks": { "keys": [ { "kty": "RSA", "kid": "...", "n": "...", "e": "AQAB", "use": "sig" } ] }
+      }'
 # Expected: 201 Created
 ```
+
+`status` accepts `active`, `blocked`, `pending`, or `inactive` (default
+`active`).
 
 **Common error responses:**
 
 | HTTP | Meaning |
 |------|---------|
-| `400` | Could not fetch or verify the subordinate's Entity Configuration — check their `/.well-known/openid-federation` is reachable and returns a valid JWT |
-| `409` | Already enrolled — use a re-enroll if they rotated their keys |
+| `400` | Invalid request — e.g. `status cannot be active without keys` (you set/defaulted status to `active` but supplied no `jwks`), or an invalid status value |
+| `409` | Already enrolled — `POST` is **not** idempotent. To update a record, use the `jwks` / `status` endpoints or `PUT /subordinates/{id}` (see Re-enroll below) |
 
 ### Inspect one subordinate
 
@@ -142,14 +159,19 @@ curl -s -u "$CREDS" \
 
 ### Re-enroll (after subordinate key rotation)
 
-`POST` is idempotent — it updates an existing record if one exists:
+`POST` is **not** idempotent — re-posting an existing `entity_id` returns
+`409 Conflict`. To update a subordinate's keys after they rotate, replace the
+stored JWKS directly (URL-encode the `entity_id` in the path):
 
 ```bash
 curl -s -u "$CREDS" \
-  -X POST http://localhost:7673/api/v1/admin/subordinates \
+  -X PUT "http://localhost:7673/api/v1/admin/subordinates/https%3A%2F%2Fsome-idp.example.org/jwks" \
   -H 'Content-Type: application/json' \
-  -d '{"entity_identifier":"https://some-idp.example.org"}'
+  -d '{"keys":[ { "kty":"RSA", "kid":"...", "n":"...", "e":"AQAB", "use":"sig" } ]}'
 ```
+
+Alternatively, to re-fetch keys automatically from the entity, remove the
+subordinate (below) and re-add it via `/enroll` (§9).
 
 ### Remove a subordinate
 
@@ -256,14 +278,17 @@ Expected top-level fields: `iss`, `sub` (both = entity_id), `jwks`,
 
 ---
 
-## 9. Legacy enrollment endpoint (`/enroll`)
+## 9. Enrollment endpoint (`/enroll`)
 
-> **This is a legacy interface retained for backward compatibility.**  
-> Prefer the Admin API (§5 above) for all new workflows.
+> **Recommended for enrolling a live entity.** Unlike the Admin API, `/enroll`
+> fetches and verifies the subordinate's keys for you. Use the Admin API (§5)
+> for everything else — removal, metadata, lifetimes, key updates.
 
-`/enroll` is a simple HTTP GET endpoint that fetches and enrolls a
-subordinate in a single call.  It is blocked by Caddy on port 443 (HTTP 403)
-and is reachable only via an SSH tunnel to the **main server port 7672**.
+`/enroll` is a simple HTTP GET endpoint that fetches the subordinate's Entity
+Configuration from its `/.well-known/openid-federation`, verifies it, extracts
+the JWKS, and enrolls it in a single call.  It is blocked by Caddy on port 443
+(HTTP 403) and is reachable only via an SSH tunnel to the **main server port
+7672**.
 
 ```bash
 # Open a tunnel to the main server port (separate from the Admin API tunnel)
@@ -279,7 +304,8 @@ curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
 | | Admin API (7673) | `/enroll` (7672) |
 |---|---|---|
 | Authentication | HTTP Basic Auth | None (admin access = open tunnel) |
-| Enroll | `POST /api/v1/admin/subordinates` | `GET /enroll?sub=...` |
+| Enroll | `POST /api/v1/admin/subordinates` (you must supply `jwks`) | `GET /enroll?sub=...` (auto-fetches keys) |
+| Auto-fetches keys | No | Yes |
 | Remove | `DELETE /api/v1/admin/subordinates/{id}` | Not available |
-| Metadata mgmt | Full CRUD | Not available |
-| Recommended for | All new operations | Quick one-off enroll |
+| Metadata / key mgmt | Full CRUD | Not available |
+| Recommended for | Removal, metadata, lifetimes, key updates | Enrolling a live entity |
