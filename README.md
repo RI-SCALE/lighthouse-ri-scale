@@ -146,7 +146,11 @@ curl -s https://trust-anchor.dep.dev.rciam.grnet.gr/list
 Lighthouse 0.20.x exposes a REST Admin API on port `7673` for managing
 subordinate entities, federation metadata, signing key rotation, and statistics.
 This is the **primary management interface** — it replaces the legacy `lhcli`
-CLI tool and the `/enroll` HTTP endpoint.
+CLI tool.
+
+> **Note:** the Admin API does not fetch a subordinate's keys for you. To
+> enroll a live entity by auto-fetching its keys, use the `/enroll` endpoint
+> (port 7672) — see [ADMIN_API.md](ADMIN_API.md) §9.
 
 **Port 7673 is bound to loopback only** (`127.0.0.1:7673:7673`) and is
 additionally blocked by Caddy on port 443. Access it exclusively via SSH tunnel.
@@ -167,11 +171,15 @@ curl -s -X POST http://localhost:7673/api/v1/admin/users \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"YOUR_STRONG_PASSWORD"}'
 
-# 4. Enroll a subordinate
-curl -s -u "admin:PASSWORD" -X POST \
-  http://localhost:7673/api/v1/admin/subordinates \
-  -H 'Content-Type: application/json' \
-  -d '{"entity_identifier":"https://some-idp.example.org"}'
+# 4. Enroll a subordinate (auto-fetches its keys — recommended)
+#    Needs a separate tunnel to the main port: ssh -L 7672:localhost:7672 trust-anchor
+curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
+#
+#    Admin API alternative: does NOT auto-fetch keys — you must supply a jwks,
+#    and the field is "entity_id" (default status "active" requires keys):
+#    curl -s -u "admin:PASSWORD" -X POST http://localhost:7673/api/v1/admin/subordinates \
+#      -H 'Content-Type: application/json' \
+#      -d '{"entity_id":"https://some-idp.example.org","jwks":{"keys":[ ... ]}}'
 
 # 5. List subordinates
 curl -s -u "admin:PASSWORD" \

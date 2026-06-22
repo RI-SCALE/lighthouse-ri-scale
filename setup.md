@@ -272,14 +272,18 @@ both.
 
 Lighthouse 0.20.x provides three ways to manage subordinates:
 
-| Method | Interface | Recommended for |
-|---|---|---|
-| **Admin API** | `POST /api/v1/admin/subordinates` on port 7673 | All new operations — enroll, remove, re-enroll |
-| **`/enroll`** (legacy) | `GET /enroll?sub=...` on port 7672 | Quick one-off enroll; no auth beyond the SSH tunnel |
-| **`/enroll-request`** | `GET /enroll-request?sub=...` (public) | Subordinate self-service; request stays `pending` until admin approval |
+| Method | Interface | Recommended for | Auto-fetches keys? |
+|---|---|---|---|
+| **`/enroll`** | `GET /enroll?sub=...` on port 7672 | Enrolling a live entity; no auth beyond the SSH tunnel | **Yes** |
+| **`/enroll-request`** | `GET /enroll-request?sub=...` (public) | Subordinate self-service; request stays `pending` until admin approval | Yes |
+| **Admin API** | `POST /api/v1/admin/subordinates` on port 7673 | Removal, metadata, lifetimes, key updates | **No** — you must supply `jwks` |
 
-All three methods fetch and verify the subordinate's Entity Configuration
-live, extract the JWKS, and write to the PostgreSQL database — no downtime.
+`/enroll` and `/enroll-request` fetch and verify the subordinate's Entity
+Configuration live, extract the JWKS, and write it to the database — no
+downtime. The **Admin API does not** fetch keys: `POST /subordinates` takes an
+`entity_id` and, because the default `status` is `active`, **requires a `jwks`
+in the body** (otherwise it returns `status cannot be active without keys`).
+For enrolling a live entity, prefer `/enroll`.
 
 ### 7.2 Prerequisites: SSH tunnel to Admin API
 
@@ -298,13 +302,25 @@ curl -s -o /dev/null -w '%{http_code}' http://localhost:7673/api/v1/admin/docs
 # Expected: 200
 ```
 
-### 7.3 Enroll a subordinate (Admin API)
+### 7.3 Enroll a subordinate
+
+**Recommended — `/enroll` (auto-fetches the entity's keys):**
+
+```bash
+# Separate tunnel to the main server port (see §7.6)
+ssh -L 7672:localhost:7672 YOUR_USER@trust-anchor.dep.dev.rciam.grnet.gr
+
+curl -i "http://localhost:7672/enroll?sub=https://some-idp.example.org"
+# Expected: 201 Created
+```
+
+**Admin API alternative (you must supply the `jwks` yourself):**
 
 ```bash
 curl -s -u "admin:YOUR_PASSWORD" \
   -X POST http://localhost:7673/api/v1/admin/subordinates \
   -H 'Content-Type: application/json' \
-  -d '{"entity_identifier":"https://some-idp.example.org"}'
+  -d '{"entity_id":"https://some-idp.example.org","jwks":{"keys":[ ... ]}}'
 # Expected: 201 Created
 ```
 
@@ -312,8 +328,8 @@ curl -s -u "admin:YOUR_PASSWORD" \
 
 | Status | Meaning |
 |---|---|
-| `400 Bad Request` | Could not fetch or verify the subordinate's Entity Configuration — check their `/.well-known/openid-federation` is reachable and returns a valid JWT |
-| `409 Conflict` | Already enrolled — re-POST to update (idempotent) |
+| `400 Bad Request` | Invalid request — e.g. `status cannot be active without keys` (no `jwks` supplied while status is/defaults to `active`); or, for `/enroll`, the entity's `/.well-known/openid-federation` is unreachable or not a valid JWT |
+| `409 Conflict` | Already enrolled — `POST` is **not** idempotent; update via the `jwks`/`status` endpoints instead |
 
 ### 7.4 Verify enrollment
 
@@ -340,11 +356,13 @@ curl -s -u "admin:YOUR_PASSWORD" -X DELETE \
 # Expected: 204 No Content
 ```
 
-### 7.6 Legacy: `/enroll` endpoint
+### 7.6 The `/enroll` endpoint
 
-The `/enroll` GET endpoint is retained for backward compatibility.  It is
-blocked by Caddy on port 443 and requires an SSH tunnel to port **7672**
-(the main federation server port, separate from the Admin API port 7673).
+The `/enroll` GET endpoint fetches the subordinate's Entity Configuration,
+extracts its JWKS, and enrolls it in one call — the simplest way to enroll a
+live entity. It is blocked by Caddy on port 443 and requires an SSH tunnel to
+port **7672** (the main federation server port, separate from the Admin API
+port 7673).
 
 ```bash
 # Tunnel to port 7672
