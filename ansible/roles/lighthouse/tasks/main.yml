@@ -224,12 +224,19 @@
 
 - name: Extract entity_id from live JWT
   ansible.builtin.shell: >
-    echo '{{ federation_endpoint.content }}' |
+    echo '{{ federation_endpoint.json.access_token }}' |
     cut -d'.' -f2 |
     python3 -c "import sys,base64,json; d=sys.stdin.read().strip(); d+='='*(-len(d)%4); print(json.loads(base64.urlsafe_b64decode(d))['iss'])"
   register: jwt_iss
   changed_when: false
+  when:
+    - federation_endpoint.json is defined
+    - federation_endpoint.json.access_token is defined
+    - federation_endpoint.json.access_token | length > 0
 
 - name: Show entity_id from live JWT
   ansible.builtin.debug:
     msg: "Trust Anchor is UP. Entity ID in JWT iss claim: {{ jwt_iss.stdout }}"
+  when:
+    - jwt_iss is not skipped
+    - jwt_iss.stdout is defined
